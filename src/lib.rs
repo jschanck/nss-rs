@@ -9,7 +9,7 @@
 pub mod agent;
 mod agentio;
 mod auth;
-mod cert;
+pub mod cert;
 pub mod constants;
 mod ech;
 #[macro_use]
