@@ -72,6 +72,27 @@ struct Bindings {
     cplusplus: bool,
 }
 
+impl Bindings {
+    fn check_sorted(&self, name: &str) {
+        for (field, values) in [
+            ("types", &self.types),
+            ("functions", &self.functions),
+            ("variables", &self.variables),
+            ("opaque", &self.opaque),
+            ("enums", &self.enums),
+            ("exclude", &self.exclude),
+        ] {
+            if let Some((a, b)) = values
+                .iter()
+                .zip(values.iter().skip(1))
+                .find(|(a, b)| a >= b)
+            {
+                panic!("{name}.{field} is not sorted (or has duplicates): {a:?} >= {b:?}");
+            }
+        }
+    }
+}
+
 // bindgen needs access to libclang.
 // On windows, this doesn't just work, you have to set LIBCLANG_PATH.
 // Rather than download the 400Mb+ files, like gecko does, let's just reuse their work.
@@ -635,44 +656,49 @@ fn setup_for_gecko() -> Vec<String> {
 }
 
 fn process_config(config: &mut HashMap<String, Bindings>) {
-    let mut excludes = HashMap::new();
-    for header in config.keys().cloned() {
+    for (n, b) in config.iter() {
+        b.check_sorted(n);
+    }
+
+    let names = config.keys().cloned().collect::<Vec<_>>();
+    for name in names {
         // Collect the list of types, functions, and variables configured
         // for generation in any other configured header, and add it to the list
         // of items excluded from generation in this header. This ensures that
         // each item only appears in one bindings module, which prevents some
         // type conflicts. (However, it does mean that appropriate `use`
         // declarations must be added for the generated modules.)
-        excludes.insert(
-            header.clone(),
-            config
-                .iter()
-                .flat_map(|(h, b)| {
-                    if *h == header {
-                        vec![]
-                    } else {
-                        vec![&b.types, &b.functions, &b.variables]
-                    }
-                    .into_iter()
-                    .flat_map(|v| v.iter())
-                    .cloned()
-                })
-                .collect::<HashSet<String>>(),
-        );
+        let excl = config
+            .iter()
+            .filter(|(n, _)| **n != name)
+            .flat_map(|(_, b)| [&b.types, &b.functions, &b.variables])
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        config
+            .get_mut(&name)
+            .expect("key disappeared from config?") // impossible
+            .exclude
+            .extend(excl);
     }
 
-    for (header, excludes) in excludes {
-        config
-            .get_mut(&header)
-            .expect("key disappeared from config?")
-            .exclude
-            .extend(excludes);
+    for b in config.values_mut() {
+        b.exclude.sort_unstable();
+        b.exclude.dedup();
     }
 }
 
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rustc-check-cfg=cfg(nss_nodb)");
+
+    let config_file = PathBuf::from(BINDINGS_DIR).join(BINDINGS_CONFIG);
+    println!("cargo:rerun-if-changed={}", config_file.to_str().unwrap());
+    let config = fs::read_to_string(config_file).expect("unable to read binding configuration");
+    let mut config: HashMap<String, Bindings> = ::toml::from_str(&config).unwrap();
+    process_config(&mut config);
+
     setup_clang();
 
     let min_version = min_nss_version();
@@ -700,12 +726,6 @@ fn main() {
     } else {
         pkg_config(&min_version).unwrap_or_else(|_| setup_standalone(nss_dir()))
     };
-
-    let config_file = PathBuf::from(BINDINGS_DIR).join(BINDINGS_CONFIG);
-    println!("cargo:rerun-if-changed={}", config_file.to_str().unwrap());
-    let config = fs::read_to_string(config_file).expect("unable to read binding configuration");
-    let mut config: HashMap<String, Bindings> = ::toml::from_str(&config).unwrap();
-    process_config(&mut config);
 
     for (k, v) in &config {
         build_bindings(k, v, &flags[..], cfg!(feature = "gecko"));
